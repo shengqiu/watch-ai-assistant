@@ -90,8 +90,8 @@ function sanitize(raw) {
     .replace(/[ \t]+\n/g, "\n");
 }
 
-const RE_EXIT = /^__WS_EXIT__(-?\d+)__\s*$/;
-const RE_PWD = /^__WS_PWD__(.*)__\s*$/;
+// 收尾 marker：单行同时带 exit code 和 cwd（合并成一行，避免两条 marker 的时序问题）
+const RE_MARKER = /^__WS__(-?\d+)__(.*)__$/;
 
 // ------------------------------------------------------------------ 状态
 
@@ -165,7 +165,6 @@ function startShell() {
   child.stdin.write("stty -echo 2>/dev/null\n");
   child.stdin.write("export PS1=''; export PROMPT_COMMAND=''; export TERM=dumb\n");
   child.stdin.write(`cd ${JSON.stringify(WORKDIR)} 2>/dev/null || cd ~\n`);
-  child.stdin.write(`printf '__WS_PWD__%s__\\n' "$PWD"\n`);
 }
 
 // ------------------------------------------------------------------ 回传
@@ -234,15 +233,11 @@ function onShellData(raw) {
     const line = partial.slice(0, idx);
     partial = partial.slice(idx + 1);
 
-    const mExit = RE_EXIT.exec(line);
-    if (mExit) {
-      finish(Number(mExit[1]));
-      continue;
-    }
-    const mPwd = RE_PWD.exec(line);
-    if (mPwd) {
-      if (running) running.cwd = mPwd[1];
-      else cwd = mPwd[1];
+    const mMarker = RE_MARKER.exec(line.trim());
+    if (mMarker) {
+      if (running) running.cwd = mMarker[2];
+      else cwd = mMarker[2];
+      finish(Number(mMarker[1]));
       continue;
     }
     // 回显兜底：命令本身被 PTY 回显时，首行重复则丢弃（stty 失效的场景）
@@ -275,8 +270,8 @@ function runCommand(id, cmd) {
   log(`exec: ${cmd.replace(/\n/g, " ; ")}`);
 
   child.stdin.write(cmd + "\n");
-  // marker 单独下发：拿 exit code + 执行后的 cwd（这样 cd 才能跨消息生效）
-  child.stdin.write(`__r=$?; printf '\\n__WS_EXIT__%s__\\n' "$__r"; printf '__WS_PWD__%s__\\n' "$PWD"; unset __r\n`);
+  // 收尾 marker：单行同时回 exit code 和执行后的 cwd（cd 才能跨消息生效）
+  child.stdin.write(`__r=$?; printf '\\n__WS__%s__%s__\\n' "$__r" "$PWD"; unset __r\n`);
   scheduleFlush();
 }
 
