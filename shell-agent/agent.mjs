@@ -219,6 +219,7 @@ function finish(exit) {
   if (r.truncated) text += "\n…输出过长，已截断";
   cwd = r.cwd || cwd;
   void postOut({ id: r.id, text, done: true, exit, cwd: r.cwd || null });
+  log(`done: exit=${exit} cwd=${r.cwd || ""} chars=${r.sentChars}`);
 }
 
 // ------------------------------------------------------------------ 输出解析
@@ -271,6 +272,7 @@ function runCommand(id, cmd) {
   running = { id, cmd, cwd: null, sentChars: 0, truncated: false, stallNotified: false };
   buf = [];
   partial = "";
+  log(`exec: ${cmd.replace(/\n/g, " ; ")}`);
 
   child.stdin.write(cmd + "\n");
   // marker 单独下发：拿 exit code + 执行后的 cwd（这样 cd 才能跨消息生效）
