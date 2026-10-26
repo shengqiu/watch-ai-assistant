@@ -343,7 +343,7 @@ async function subscribe(signal) {
 
 const KEY = resolveKey();
 
-function main() {
+async function main() {
   if (!KEY) {
     log(
       `缺少密钥：设置环境变量 WATCH_AI_AGENT_KEY，或写入 ${KEY_FILE}` +
