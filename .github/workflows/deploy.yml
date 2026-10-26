@@ -35,8 +35,14 @@ jobs:
           cache: npm
           cache-dependency-path: workers-impl/package-lock.json
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (retry for esbuild ETXTBSY flake)
+        run: |
+          for i in 1 2 3; do
+            npm ci && break
+            echo "npm ci attempt $i failed, retrying in 10s..."
+            sleep 10
+            [ "$i" = "3" ] && exit 1
+          done
 
       - name: Typecheck
         run: npm run typecheck
@@ -58,8 +64,14 @@ jobs:
           cache: npm
           cache-dependency-path: workers-impl/package-lock.json
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (retry for esbuild ETXTBSY flake)
+        run: |
+          for i in 1 2 3; do
+            npm ci && break
+            echo "npm ci attempt $i failed, retrying in 10s..."
+            sleep 10
+            [ "$i" = "3" ] && exit 1
+          done
         working-directory: workers-impl
 
       - name: Dry-run check (pre-flight)
