@@ -1,7 +1,4 @@
 {
   "name": "watch-ai-assistant",
-  // 容器启动后自动拉起 shell agent（幂等脚本：已在跑就不重复起）。
-  // 这是 devbot「联机 shell」的 codespace 侧执行体——CF Worker 无法出站 SSH，
-  // 只能由 agent 反向连出来建 SSE 长连接。
   "postStartCommand": "bash .devcontainer/post-start.sh"
 }
