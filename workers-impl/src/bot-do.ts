@@ -20,6 +20,7 @@ import type { TgUpdate } from "./telegram/types";
 import { parseIntent, effortFor, type Intent } from "./router/intent";
 import { chatChain, loadProviders, type ChatResult } from "./router/providers";
 import { chunkText, transcribeBytes } from "./asr";
+import { isVerified, isAnswerMatch, nextExpiry, CHALLENGE_TEXT, type VerifyState } from "./verify";
 
 // 构建标记：每次改动后递增，方便确认线上跑的是不是最新包（curl /healthz 看 build 字段）。
 // v2：Gemini 思考档位控制（reasoning_effort）+ 模型级降级 fallback + 分层超时。
@@ -48,7 +49,7 @@ import { chunkText, transcribeBytes } from "./asr";
 // v16：移除 QQ 通道——删除 src/qq/、docs/HOSTING.md（早期选址文档）与 diagram.html
 //     （早期架构图），env/config/路由/测试同步清理；仅保留 Telegram 单通道。
 //     消息流水线、LLM 路由、状态存储逻辑不变。
-const BUILD = "telegram-20261026-v17";
+const BUILD = "telegram-20261026-v18";
 
 const SYSTEM_PROMPT = `你是一位资深软件工程师，通过用户的智能手表语音接收编程需求。
 输出要求：
@@ -175,6 +176,28 @@ export class AssistantDO extends DurableObject<Env> {
       return;
     }
     console.log(`[tg] 消息 chat=${m.chatId} source=${source} text=${text.slice(0, 80)}`);
+
+    // 5.5) 身份验证（30 分钟滑动会话）：
+    //   - 未验证：一切问题/指令都不转发 LLM，只回验证问题；
+    //     若这条消息本身就是正确答案（「爸爸」）→ 通过并延续 30 分钟。
+    //   - 已验证：任何交互把会话滑动延续 30 分钟。
+    //   - 设备限制由「白名单账号」达成（Telegram 不提供设备信息）。
+    const now = Date.now();
+    const verifyAnswer = this.env.VERIFY_ANSWER || "爸爸";
+    const sessionMs = this.verifySessionMs();
+    const state = await this.getVerify(m.chatId);
+    if (!isVerified(state, now)) {
+      if (isAnswerMatch(text, verifyAnswer)) {
+        await this.setVerify(m.chatId, nextExpiry(now, sessionMs));
+        await this.reply(m.chatId, "验证通过 ✓（半小时内互动免验证）");
+        return;
+      }
+      await this.setVerify(m.chatId, 0); // 保持未验证
+      await this.reply(m.chatId, CHALLENGE_TEXT);
+      return;
+    }
+    // 已验证 → 滑动延续
+    await this.setVerify(m.chatId, nextExpiry(now, sessionMs));
 
     // 6.5) 诊断命令：回显最后一轮模型回复的原文格式，定位「高亮不生效」问题。
     // 用可见标记替换围栏/缩进，纯文本发送（不走 mdToV2，避免二次转换干扰判断）。
@@ -384,6 +407,24 @@ export class AssistantDO extends DurableObject<Env> {
   }
   private dailyBudget(): number {
     return Number(this.env.DAILY_CALL_BUDGET ?? 200);
+  }
+
+  /** 验证会话时长（分钟，默认 30） */
+  private verifySessionMs(): number {
+    const min = Number(this.env.VERIFY_SESSION_MIN ?? 30);
+    return (Number.isFinite(min) && min > 0 ? min : 30) * 60_000;
+  }
+
+  // ---------------------------------------------------------------- 验证会话存储
+
+  private async getVerify(chatId: string): Promise<VerifyState | undefined> {
+    const key = `verify:${chatId}`;
+    const v = await this.ctx.storage.get<number>(key);
+    return v === undefined ? undefined : { exp: v };
+  }
+
+  private async setVerify(chatId: string, exp: number): Promise<void> {
+    this.ctx.storage.put(`verify:${chatId}`, exp);
   }
 
   private async status(): Promise<Record<string, unknown>> {

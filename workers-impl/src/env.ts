@@ -35,6 +35,10 @@ export interface Env {
   RATE_LIMIT_PER_MIN?: string;
   DAILY_CALL_BUDGET?: string;
   REPLY_CHUNK_SIZE?: string;
+
+  // 身份验证会话（「爸爸」挑战）：答案（var/secret，默认「爸爸」）+ 会话时长（分钟，默认 30）
+  VERIFY_ANSWER?: string;
+  VERIFY_SESSION_MIN?: string;
 }
 
 // DurableObjectNamespace 是 workers-types 的全局类型（v5 无需 import）。

@@ -32,7 +32,8 @@ SESSION_MAX_TURNS = "10"            # 会话保留轮数（user+assistant 各算
 RATE_LIMIT_PER_MIN = "20"
 DAILY_CALL_BUDGET = "200"           # 每日 LLM 调用上限（防失控烧钱）
 REPLY_CHUNK_SIZE = "800"            # 回包分段长度（手表端适合短消息）
-ALLOWED_USERS = ""               # 你的 chat_id，逗号分隔（首发一条消息后从 wrangler tail 日志里能看到）；空 = 放开（仅开发期）
+VERIFY_SESSION_MIN = "30"          # 「爸爸」验证会话时长（分钟，滑动延续）
+ALLOWED_USERS = "7618809103"      # 白名单（逗号分隔可多用户；当前：用户本人）
 
 # 密钥用 wrangler secret put 注入（不要写在这里）：
 #   TELEGRAM_BOT_TOKEN（必需，@BotFather 处获取）

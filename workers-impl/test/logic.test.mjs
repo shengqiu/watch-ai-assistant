@@ -153,5 +153,25 @@ check("语音 mime", v?.voiceMime, "audio/ogg");
 // 非消息类 update（如 callback_query）→ null
 check("无 message 返回 null", extractIncoming({ update_id: 102 }), null);
 
+// ---- 身份验证会话（verify.ts）----
+import { isVerified, isAnswerMatch, normalizeAnswer, nextExpiry, CHALLENGE_TEXT } from "../src/verify.js";
+
+const T0 = 1_000_000;
+const HALF_H = 30 * 60_000;
+
+check("未验证（无状态）", isVerified(undefined, T0), false);
+check("未验证（已过期）", isVerified({ exp: T0 - 1 }, T0), false);
+check("已验证（未到期）", isVerified({ exp: T0 + HALF_H }, T0), true);
+check("到期边界=过期", isVerified({ exp: T0 }, T0), false);
+check("答案精确匹配", isAnswerMatch("爸爸", "爸爸"), true);
+check("答案带标点", isAnswerMatch("爸爸。", "爸爸"), true);
+check("答案带空格感叹", isAnswerMatch(" 爸爸！ ", "爸爸"), true);
+check("错误答案", isAnswerMatch("妈妈", "爸爸"), false);
+check("空答案", isAnswerMatch("", "爸爸"), false);
+check("纯标点答案", isAnswerMatch("。。", "爸爸"), false);
+check("归一化去首尾标点", normalizeAnswer("。爸爸！"), "爸爸");
+check("续期计算", nextExpiry(T0, HALF_H), T0 + HALF_H);
+check("挑战文案", CHALLENGE_TEXT.includes("我要知道你是谁"), true);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
