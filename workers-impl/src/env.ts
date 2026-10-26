@@ -39,6 +39,9 @@ export interface Env {
   // 身份验证会话（「爸爸」挑战）：答案（var/secret，默认「爸爸」）+ 会话时长（分钟，默认 30）
   VERIFY_ANSWER?: string;
   VERIFY_SESSION_MIN?: string;
+
+  // 管理端点鉴权（/setup /send）：secret；未配置 = 管理端点 403（默认安全）
+  ADMIN_KEY?: string;
 }
 
 // DurableObjectNamespace 是 workers-types 的全局类型（v5 无需 import）。

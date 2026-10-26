@@ -49,7 +49,7 @@ import { isVerified, isAnswerMatch, nextExpiry, CHALLENGE_TEXT, type VerifyState
 // v16：移除 QQ 通道——删除 src/qq/、docs/HOSTING.md（早期选址文档）与 diagram.html
 //     （早期架构图），env/config/路由/测试同步清理；仅保留 Telegram 单通道。
 //     消息流水线、LLM 路由、状态存储逻辑不变。
-const BUILD = "telegram-20261026-v18";
+const BUILD = "telegram-20261026-v19";
 
 const SYSTEM_PROMPT = `你是一位资深软件工程师，通过用户的智能手表语音接收编程需求。
 输出要求：
@@ -183,17 +183,20 @@ export class AssistantDO extends DurableObject<Env> {
     //   - 已验证：任何交互把会话滑动延续 30 分钟。
     //   - 设备限制由「白名单账号」达成（Telegram 不提供设备信息）。
     const now = Date.now();
-    const verifyAnswer = this.env.VERIFY_ANSWER || "爸爸";
+    const verifyAnswer = this.env.VERIFY_ANSWER;
     const sessionMs = this.verifySessionMs();
     const state = await this.getVerify(m.chatId);
     if (!isVerified(state, now)) {
-      if (isAnswerMatch(text, verifyAnswer)) {
+      if (verifyAnswer && isAnswerMatch(text, verifyAnswer)) {
         await this.setVerify(m.chatId, nextExpiry(now, sessionMs));
         await this.reply(m.chatId, "验证通过 ✓（半小时内互动免验证）");
         return;
       }
       await this.setVerify(m.chatId, 0); // 保持未验证
-      await this.reply(m.chatId, CHALLENGE_TEXT);
+      await this.reply(
+        m.chatId,
+        verifyAnswer ? CHALLENGE_TEXT : `${CHALLENGE_TEXT}\n（管理员未配置验证答案，服务锁定中）`,
+      );
       return;
     }
     // 已验证 → 滑动延续
