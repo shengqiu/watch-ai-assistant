@@ -1,0 +1,9 @@
+{
+  "targets": [
+    { "name": "Meta Graph API（发消息/换 media 都走这）", "url": "https://graph.facebook.com/v23.0/", "note": "最关键：未认证会返回 400 JSON，能通即达" },
+    { "name": "Meta Graph API（根）", "url": "https://graph.facebook.com/", "note": "同上，老路径" },
+    { "name": "WhatsApp Business API 域名", "url": "https://www.whatsapp.com/", "note": "对照：WhatsApp 服务可达性" },
+    { "name": "Meta 开发者平台", "url": "https://developers.facebook.com/", "note": "对照：开发者站点" },
+    { "name": "Telegram API", "url": "https://api.telegram.org/", "note": "对照：已知可达" }
+  ]
+}

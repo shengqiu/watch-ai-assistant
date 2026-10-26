@@ -1,0 +1,45 @@
+name = "watch-ai-qqbot" # 保留原 worker 名以维持既有 workers.dev 地址（历史命名，与 Telegram 无关）
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Durable Object：单例，承载消息流水线与会话状态（webhook 模式按需唤醒、事毕休眠）
+[[durable_objects.bindings]]
+name = "BOT"
+class_name = "AssistantDO"
+
+# SQLite 存储（会话/去重/限流/额度）。迁移只增不减：
+#   v1 = 首个通道实现（早期 DO 类，已废弃）
+#   v2 = 删除早期 DO 类（连同其旧 schema/数据），新建 AssistantDO（当前 schema，从零开始）
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["QQBotDO"]
+
+[[migrations]]
+tag = "v2"
+deleted_classes = ["QQBotDO"]
+new_sqlite_classes = ["AssistantDO"]
+
+# 移除 Cron Trigger：显式置空 crons，清除早期长连接版本残留的每分钟触发器
+# （cron 触发器是粘性的，只删 [triggers] 段不会移除已部署的；必须 crons = []）
+[triggers]
+crons = []
+
+[vars]
+DEFAULT_CODING_PROVIDER = "gemini"  # 主厂商（2026-10-24 定）
+DEFAULT_CHAT_PROVIDER = "gemini"
+MAX_OUTPUT_TOKENS = "4096"
+SESSION_MAX_TURNS = "10"            # 会话保留轮数（user+assistant 各算一轮）
+RATE_LIMIT_PER_MIN = "20"
+DAILY_CALL_BUDGET = "200"           # 每日 LLM 调用上限（防失控烧钱）
+REPLY_CHUNK_SIZE = "800"            # 回包分段长度（手表端适合短消息）
+ALLOWED_USERS = ""               # 你的 chat_id，逗号分隔（首发一条消息后从 wrangler tail 日志里能看到）；空 = 放开（仅开发期）
+
+# 密钥用 wrangler secret put 注入（不要写在这里）：
+#   TELEGRAM_BOT_TOKEN（必需，@BotFather 处获取）
+#   GEMINI_API_KEY（主厂商）
+#   （可选）TELEGRAM_WEBHOOK_SECRET —— webhook 防伪密钥，自定义随机串
+#   （可选）STT_BASE_URL / STT_API_KEY / STT_MODEL —— 语音转写回退（推荐 Groq Whisper 免费档）
+
+# 外部服务地址（可选；留空 = 官方默认值，集中解析见 src/config.ts）。
+# 换代理 / 换区域端点 / 内网联调时取消注释并覆盖，无需改代码：
+# TELEGRAM_API_BASE=https://api.telegram.org

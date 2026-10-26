@@ -1,0 +1,64 @@
+{
+  "providers": {
+    "gemini": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "api_key": "${GEMINI_API_KEY}",
+      "default_model": "gemini-3.8-flash",
+      "flagship_model": "gemini-3.1-pro-preview",
+      "fast_model": "gemini-3.5-flash-lite",
+      "supports_reasoning_effort": true,
+      "enabled": true
+    },
+    "anthropic": {
+      "base_url": "https://api.anthropic.com/v1",
+      "api_key": "${ANTHROPIC_API_KEY}",
+      "default_model": "claude-sonnet-4-5",
+      "flagship_model": "claude-opus-4-1",
+      "fast_model": "claude-haiku-4-5",
+      "enabled": false,
+      "extra_headers": { "anthropic-version": "2023-06-01" }
+    },
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "${OPENAI_API_KEY}",
+      "default_model": "gpt-5",
+      "flagship_model": "gpt-5",
+      "fast_model": "gpt-5-mini",
+      "max_tokens_field": "max_completion_tokens"
+    },
+    "deepseek": {
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "default_model": "deepseek-chat",
+      "flagship_model": "deepseek-reasoner",
+      "fast_model": "deepseek-chat"
+    },
+    "qwen": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "${DASHSCOPE_API_KEY}",
+      "default_model": "qwen-plus",
+      "flagship_model": "qwen-max",
+      "fast_model": "qwen-turbo"
+    },
+    "zhipu": {
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key": "${ZHIPU_API_KEY}",
+      "default_model": "glm-4.6",
+      "flagship_model": "glm-4.6",
+      "fast_model": "glm-4.5-air"
+    },
+    "moonshot": {
+      "base_url": "https://api.moonshot.cn/v1",
+      "api_key": "${MOONSHOT_API_KEY}",
+      "default_model": "kimi-k2",
+      "flagship_model": "kimi-k2",
+      "fast_model": "kimi-k2"
+    },
+    "local": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "ollama",
+      "default_model": "qwen2.5-coder:7b",
+      "enabled": false
+    }
+  }
+}

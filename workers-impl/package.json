@@ -1,0 +1,19 @@
+{
+  "name": "watch-ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Apple Watch → Telegram 机器人 → 多厂商 AI 编程助手（Cloudflare Workers 实现）",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.json --noEmit false --outDir /tmp/wi-test && mkdir -p /tmp/wi-test/test && cp test/logic.test.mjs /tmp/wi-test/test/ && node /tmp/wi-test/test/logic.test.mjs",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.45.0"
+  }
+}

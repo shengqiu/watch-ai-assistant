@@ -1,0 +1,8 @@
+{
+  "apiRootUrl": "https://generativelanguage.googleapis.com/v1beta/models",
+  "generateContentUrl": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=invalid",
+  "controlProbes": [
+    { "name": "Google 主站（对照）", "url": "https://www.google.com/", "note": "Google 整体可达性" },
+    { "name": "Telegram API（对照）", "url": "https://api.telegram.org/", "note": "已知可达" }
+  ]
+}

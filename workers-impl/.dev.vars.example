@@ -1,0 +1,28 @@
+# 本地开发变量（wrangler dev 自动读取此文件）；生产环境用 wrangler secret put 逐条注入
+# 用法：cp .dev.vars.example .dev.vars 然后填入真实值
+
+# ---- Telegram 机器人（@BotFather 处 /newbot 获取）----
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+# TELEGRAM_WEBHOOK_SECRET=   # 可选：webhook 防伪密钥，自定义一串随机串
+
+# ---- 模型厂商 key ----
+GEMINI_API_KEY=
+DEEPSEEK_API_KEY=
+# ANTHROPIC_API_KEY=      # 用户已明确不用 Claude；需要时取消注释并在 providers.json 置 enabled: true
+# OPENAI_API_KEY=
+# DASHSCOPE_API_KEY=
+# ZHIPU_API_KEY=
+# MOONSHOT_API_KEY=
+
+# ---- 语音识别（可选；收到语音消息时必须配，否则只能发文字）----
+# 免费推荐 Groq Whisper：https://console.groq.com 申请 key
+# STT_BASE_URL=https://api.groq.com/openai/v1
+# STT_API_KEY=
+# STT_MODEL=whisper-large-v3
+
+# ---- 白名单（可选；你的 chat_id，首发一条消息后从 wrangler tail 日志里能看到）----
+# ALLOWED_USERS=
+
+# ---- 外部服务地址（可选；留空 = 官方默认值，集中解析见 src/config.ts）----
+# 换代理 / 换区域端点 / 内网联调时取消注释并覆盖，无需改代码：
+# TELEGRAM_API_BASE=https://api.telegram.org
