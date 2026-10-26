@@ -43,10 +43,12 @@ import { chunkText, transcribeBytes } from "./asr";
 // v15：移除微信路线——删除 reference-impl/（微信自托管实现）与 docs/ARCHITECTURE.md
 //     （早期设计文档）；docs/ 各文档与 README 同步清理微信/reference-impl 表述。
 //     端点配置化（v14）与全部功能逻辑不变。
+// v17：安全加固——白名单拒绝时回报 chat_id（限流 1 条/分钟防刷屏），
+//     TELEGRAM_WEBHOOK_SECRET 防伪校验保持既有逻辑不变。
 // v16：移除 QQ 通道——删除 src/qq/、docs/HOSTING.md（早期选址文档）与 diagram.html
 //     （早期架构图），env/config/路由/测试同步清理；仅保留 Telegram 单通道。
 //     消息流水线、LLM 路由、状态存储逻辑不变。
-const BUILD = "telegram-20261025-v16";
+const BUILD = "telegram-20261026-v17";
 
 const SYSTEM_PROMPT = `你是一位资深软件工程师，通过用户的智能手表语音接收编程需求。
 输出要求：
@@ -135,10 +137,17 @@ export class AssistantDO extends DurableObject<Env> {
     if (await this.seenMsg(key)) return;
     await this.markSeen(key);
 
-    // 2) 白名单（未配置 = 放开，仅建议开发期）。匹配 chat_id 或 user_id 任一即可
+    // 2) 白名单（未配置 = 放开，仅建议开发期）。匹配 chat_id 或 user_id 任一即可。
+    //    拒绝时回报 chat_id，方便管理员把自己加白（只回一次/分钟，避免被刷屏）。
     const allowed = (this.env.ALLOWED_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     if (allowed.length > 0 && !allowed.includes(m.chatId) && !allowed.includes(m.userId)) {
-      console.log(`[tg] 非白名单 chat=${m.chatId}，忽略`);
+      console.log(`[tg] 非白名单 chat=${m.chatId}，拒绝`);
+      if (await this.allowRate(m.chatId)) {
+        await this.reply(
+          m.chatId,
+          `未授权用户。你的 chat_id 是 ${m.chatId}，请联系管理员加入白名单。`,
+        );
+      }
       return;
     }
 
