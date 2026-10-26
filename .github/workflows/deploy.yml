@@ -1,0 +1,78 @@
+name: Test & Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "workers-impl/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (skip real deploy)"
+        required: false
+        default: "false"
+  repository_dispatch:
+    types: [deploy]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Typecheck + 79 logic tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers-impl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: workers-impl/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run logic tests
+        run: npm test
+
+  deploy:
+    name: Deploy to Cloudflare Workers
+    needs: test
+    runs-on: ubuntu-latest
+    # secrets.CLOUDFLARE_API_TOKEN 由仓库 Settings配置;变量 CLOUDFLARE_ACCOUNT_ID 同理
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: workers-impl/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: workers-impl
+
+      - name: Dry-run check (pre-flight)
+        run: npx wrangler deploy --dry-run
+        working-directory: workers-impl
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true'
+        run: npx wrangler deploy
+        working-directory: workers-impl
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
