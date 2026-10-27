@@ -72,6 +72,18 @@ const SILENCE_MS = Number(process.env.WATCH_AI_SILENCE_MS || 60000);
  * 连续 4 分钟零字节基本只有卡死一种解释。想放宽就设 WATCH_AI_WEDGE_MS。
  */
 const WEDGE_MS = Number(process.env.WATCH_AI_WEDGE_MS || 240000);
+/**
+ * 心跳间隔（毫秒）。
+ *
+ * 为什么不能再靠「SSE 写成功」判断通道活着：连接半死时（TCP 没断、对端进程
+ * 已重启或网络黑洞）Worker 那边的 write 照样成功，于是它一直以为在跑命令，
+ * 而命令其实压根没送达 —— 2026-10-27 的「上一条命令还在跑：🛠 准备 Gemini 环境」
+ * 就是这么来的：agent.log 里连 `exec:` 都没有，用户却被锁到 TTL 到期。
+ * 现在由 agent 每 15 秒主动 POST /shell/ping，Worker 只认这个。
+ */
+const PING_MS = Number(process.env.WATCH_AI_PING_MS || 15000);
+/** 本进程启动时刻，随心跳上报；Worker 据此判断「agent 重启过 → 在跑的命令丢了」。 */
+const EPOCH = Date.now();
 
 const KEY_FILE = join(homedir(), ".config", "watch-ai", "agent-key");
 /** 本机身份文件（内容 = codespace 名）；没有就不发 X-Agent-Id。 */
@@ -354,6 +366,21 @@ function postOut(payload) {
     .catch((e) => log(`回传失败：${e.message}`));
 }
 
+/** 心跳：告诉 Worker「我活着，此刻在跑的是哪条命令」（Worker 侧的在线判定只看这个）。 */
+function postPing() {
+  const body = JSON.stringify({ epoch: EPOCH, gen: shellGen, running: running ? running.id : null });
+  return fetch(`${WORKER}/shell/ping`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders("POST", "/shell/ping", body) },
+    body,
+  }).catch((e) => log(`心跳失败：${e.message}`));
+}
+
+function startPing() {
+  setInterval(() => void postPing(), PING_MS);
+  void postPing(); // 立刻报一次，别让 Worker 等满一个间隔才敢放行命令
+}
+
 function clearTimers() {
   if (flushTimer) clearTimeout(flushTimer);
   if (stallTimer) clearTimeout(stallTimer);
@@ -487,6 +514,9 @@ function onShellData(raw) {
 }
 
 function runCommand(id, cmd, quiet = false) {
+  // 幂等：Worker 会在「ack 超时」时重发同一条命令，重发不是新请求。
+  // 重复执行会毁掉幂等性（写文件 / 提交 / 扣额度），所以直接忽略。
+  if (running && running.id === id) return;
   if (!child) {
     void postOut({ id, done: true, exit: null, cwd: null, text: "⚠️ bash 未就绪，稍等几秒重试" });
     return;
@@ -495,6 +525,8 @@ function runCommand(id, cmd, quiet = false) {
     void postOut({ id, done: true, exit: null, cwd: null, text: "⚠️ 上一条命令还在跑，先 /ctrlc 中断" });
     return;
   }
+  // 签收：让 Worker 知道这条命令**真的到了**（不是写进了一条死连接）。
+  void postOut({ id, ack: true });
   running = { id, cmd, cwd: null, sentChars: 0, truncated: false, stallNotified: false, everOutput: false };
   buf = [];
   partial = "";
@@ -612,6 +644,7 @@ async function main() {
   mkdirSync(dirname(LOG_FILE), { recursive: true });
   startShell();
   startWedgeWatchdog();
+  startPing();
 
   let backoff = 1000;
   for (;;) {
