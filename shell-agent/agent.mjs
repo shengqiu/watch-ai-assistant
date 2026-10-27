@@ -162,9 +162,11 @@ function startShell() {
   });
   child.on("error", (e) => log(`bash spawn 失败：${e.message}`));
 
-  // 关掉终端回显（否则每条命令会被原样再吐一遍）+ 清空提示符噪声
+  // 关掉终端回显（否则每条命令会被原样再吐一遍）+ 清空提示符噪声。
+  // PS2 必须一起清：多行命令（heredoc / if 块 / 子 shell）会打印续行提示符 "> "，
+  // 每条都混进 Telegram 输出里，看起来像乱码。
   child.stdin.write("stty -echo 2>/dev/null\n");
-  child.stdin.write("export PS1=''; export PROMPT_COMMAND=''; export TERM=dumb\n");
+  child.stdin.write("export PS1=''; export PS2=''; export PROMPT_COMMAND=''; export TERM=dumb\n");
   child.stdin.write(`cd ${JSON.stringify(WORKDIR)} 2>/dev/null || cd ~\n`);
 }
 
