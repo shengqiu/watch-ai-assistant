@@ -65,7 +65,8 @@ function log(msg) {
   } catch {
     /* 日志写不了就算了，不能因此崩掉 */
   }
-  console.log(line);
+  // 不要再 console.log：supervise.sh 已把 stdout 重定向到同一个 agent.log，
+  // 两边都写会让每行日志出现两次，排障时很迷惑。
 }
 
 // ------------------------------------------------------------------ 输出清洗
@@ -174,7 +175,12 @@ function postOut(payload) {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Agent-Key": KEY },
     body: JSON.stringify(payload),
-  }).catch((e) => log(`回传失败：${e.message}`));
+  })
+    .then((r) => {
+      if (!r.ok) log(`回传被拒：HTTP ${r.status}`);
+      return r.text().catch(() => "");
+    })
+    .catch((e) => log(`回传失败：${e.message}`));
 }
 
 function clearTimers() {
