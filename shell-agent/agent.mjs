@@ -36,8 +36,8 @@ const WORKDIR = process.env.WATCH_AI_WORKDIR || "/workspaces/watch-ai-assistant"
 
 /** 增量输出静默多久就推一条消息（毫秒） */
 const FLUSH_MS = Number(process.env.WATCH_AI_FLUSH_MS || 1200);
-/** 多久没有任何输出就提示「仍在运行」（不杀进程，只告知） */
-const STALL_MS = Number(process.env.WATCH_AI_STALL_MS || 20000);
+/** 多久没有任何输出就提示「仍在运行」（不杀进程，只告知）。Gemini 思考常超 20s，故放宽。 */
+const STALL_MS = Number(process.env.WATCH_AI_STALL_MS || 30000);
 /** 单条命令最多回传多少字符（超出丢弃；Worker 端还有一层掐头尾） */
 const MAX_CHARS = Number(process.env.WATCH_AI_MAX_CHARS || 60000);
 /** 多久没收到 SSE 字节就当死连接重连（Worker 心跳 20s） */
@@ -261,7 +261,7 @@ function onShellData(raw) {
   }
 }
 
-function runCommand(id, cmd) {
+function runCommand(id, cmd, quiet = false) {
   if (!child) {
     void postOut({ id, done: true, exit: null, cwd: null, text: "⚠️ bash 未就绪，稍等几秒重试" });
     return;
@@ -273,7 +273,8 @@ function runCommand(id, cmd) {
   running = { id, cmd, cwd: null, sentChars: 0, truncated: false, stallNotified: false };
   buf = [];
   partial = "";
-  log(`exec: ${cmd.replace(/\n/g, " ; ")}`);
+  // quiet：命令原文含密钥（如 /gemini key），只记长度不记内容
+  log(quiet ? `exec: [hidden ${cmd.length} chars]` : `exec: ${cmd.replace(/\n/g, " ; ")}`);
 
   child.stdin.write(cmd + "\n");
   // 收尾 marker：单行同时回 exit code 和执行后的 cwd（cd 才能跨消息生效）
@@ -292,7 +293,7 @@ function sendCtrlC() {
 // ------------------------------------------------------------------ SSE 订阅
 
 function handleEvent(ev) {
-  if (ev?.t === "cmd") runCommand(ev.id, ev.cmd);
+  if (ev?.t === "cmd") runCommand(ev.id, ev.cmd, ev.q === 1);
   else if (ev?.t === "ctrlc") sendCtrlC();
 }
 
