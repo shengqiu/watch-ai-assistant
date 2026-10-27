@@ -50,6 +50,25 @@ load_secret() {
 load_secret WATCH_AI_AGENT_KEY
 load_secret GEMINI_API_KEY
 
+# ------------------------------------------------- 1.1) 写本机身份（X-Agent-Id）
+# 用途：Worker 侧配了 AGENT_ID 时，只接受「这台开发机」的 agent 连接。
+# 密钥万一泄漏，别的机器即使拿着它连上来，身份也对不上（多一层，非密码学绑定）。
+# 取值优先级：CODESPACE_NAME → devContainerTelemetry.json 里的 environmentId。
+# 两者都没有就留空（Worker 侧只记录不强制，不会因此断连）。
+IDENTITY_FILE="$HOME/.config/watch-ai/agent-id"
+if [ -z "${WATCH_AI_AGENT_ID:-}" ]; then
+  id_val="${CODESPACE_NAME:-}"
+  if [ -z "$id_val" ]; then
+    id_val=$(sed -n 's/.*"environmentId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      /workspaces/.codespaces/shared/devContainerTelemetry.json 2>/dev/null | head -1)
+  fi
+  if [ -n "$id_val" ]; then
+    mkdir -p "$(dirname "$IDENTITY_FILE")"
+    printf '%s' "$id_val" >"$IDENTITY_FILE"
+    log "已写入身份 $id_val"
+  fi
+fi
+
 # ------------------------------------------------- 1.5) 一次性装 ripgrep（后台）
 # Gemini CLI 找不到 rg 时会退化成 GrepTool，并在每条回答前打一行
 # 「Ripgrep is not available. Falling back to GrepTool.」——Telegram 里纯噪音。
