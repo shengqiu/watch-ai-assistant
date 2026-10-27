@@ -22,6 +22,10 @@ log() { echo "$(date -Is) $*" >>"$LOG_DIR/post-start.log"; }
 
 cd "$REPO_DIR" 2>/dev/null || { log "仓库目录不存在：$REPO_DIR"; exit 0; }
 
+# 每次开机尽量快进到 origin/main，保证跑的是最新 agent。
+# --ff-only：一旦分叉或本地有改动就静默跳过，绝不覆盖你在 codespace 里的工作。
+git pull -q --ff-only origin main >/dev/null 2>&1 || true
+
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
   log "agent 已在运行（pid=$(cat "$PIDFILE")），跳过"
   exit 0
