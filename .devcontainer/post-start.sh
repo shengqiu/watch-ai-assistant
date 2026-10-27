@@ -50,6 +50,19 @@ load_secret() {
 load_secret WATCH_AI_AGENT_KEY
 load_secret GEMINI_API_KEY
 
+# ------------------------------------------------- 1.5) 一次性装 ripgrep（后台）
+# Gemini CLI 找不到 rg 时会退化成 GrepTool，并在每条回答前打一行
+# 「Ripgrep is not available. Falling back to GrepTool.」——Telegram 里纯噪音。
+# 标记放 /tmp（容器级）：容器重建才重装一次，stop/start 不会重复 apt。
+if ! command -v rg >/dev/null 2>&1 && [ ! -f /tmp/.watch-ai-rg-tried ]; then
+  : >/tmp/.watch-ai-rg-tried
+  (
+    sudo apt-get update -qq >/dev/null 2>&1
+    sudo apt-get install -y -qq ripgrep >/dev/null 2>&1
+    command -v rg >/dev/null 2>&1 && echo "$(date -Is) ripgrep 已安装" >>"$LOG_DIR/post-start.log"
+  ) &
+fi
+
 # 每次开机尽量快进到 origin/main，保证跑的是最新 agent。
 # --ff-only：一旦分叉或本地有改动就静默跳过，绝不覆盖你在 codespace 里的工作。
 git pull -q --ff-only origin main >/dev/null 2>&1 || true
