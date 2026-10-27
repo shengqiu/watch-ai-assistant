@@ -22,15 +22,32 @@
  */
 
 import { spawn, execFileSync } from "node:child_process";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
 // ------------------------------------------------------------------ 配置
 
-const WORKER = (
+const WORKER_RAW = (
   process.env.WATCH_AI_WORKER || "https://watch-ai-devbot.shengqiu-purdue.workers.dev"
 ).replace(/\/+$/, "");
+
+/**
+ * 只允许 https（本机调试除外）。
+ *
+ * 通道里跑的是 root 级命令，走明文 http 等于把密钥和命令都摆在大马路上；
+ * 一旦有人把 WATCH_AI_WORKER 打错成 http:// 或中间人换了地址，必须立刻拒绝。
+ */
+const WORKER = (() => {
+  const local = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(WORKER_RAW);
+  if (WORKER_RAW.startsWith("http://") && !local) {
+    return WORKER_RAW.replace(/^http:\/\//, "https://");
+  }
+  return WORKER_RAW;
+})();
+/** 本机联调地址（只有它能走明文 http，方便本地起假 Worker 做验证）。 */
+const WORKER_IS_LOCAL = WORKER.startsWith("http://");
 
 const WORKDIR = process.env.WATCH_AI_WORKDIR || "/workspaces/watch-ai-assistant";
 
@@ -57,6 +74,8 @@ const SILENCE_MS = Number(process.env.WATCH_AI_SILENCE_MS || 60000);
 const WEDGE_MS = Number(process.env.WATCH_AI_WEDGE_MS || 240000);
 
 const KEY_FILE = join(homedir(), ".config", "watch-ai", "agent-key");
+/** 本机身份文件（内容 = codespace 名）；没有就不发 X-Agent-Id。 */
+const ID_FILE = join(homedir(), ".config", "watch-ai", "agent-id");
 const LOG_FILE = join(homedir(), ".cache", "watch-ai-shell", "agent.log");
 
 function resolveKey() {
@@ -68,6 +87,76 @@ function resolveKey() {
     /* ignore */
   }
   return "";
+}
+
+/**
+ * 本机身份（发给 Worker 的 X-Agent-Id）。
+ * 用于把「密钥」和「这台开发机」绑在一起：密钥一旦泄漏，别的机器拿它连上来
+ * 也会因为 identity 不符被 Worker 拒掉（Worker 侧配了 AGENT_ID 才强制）。
+ */
+function resolveAgentId() {
+  const fromEnv = (process.env.WATCH_AI_AGENT_ID || "").trim();
+  if (fromEnv) return fromEnv;
+  try {
+    if (existsSync(ID_FILE)) return readFileSync(ID_FILE, "utf8").trim();
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+
+// ------------------------------------------------------------------ 签名 / 验签
+//
+// 与 Worker 的 src/agent-auth.ts 必须逐字节一致：
+//   请求  v1\n<ts>\n<nonce>\n<METHOD>\n<path>\n<sha256(body)>
+//   命令  v1\n<id>\n<cmd>
+//
+// 密钥只用来算签名，**不再随请求发送**——以前那个 X-Agent-Key 头等于每一次
+// 请求都把密钥明文写一遍，落进任何一份日志就彻底泄漏了。
+
+const AUTH_WINDOW_MS = 120_000;
+/** Worker 未签名的命令是否执行。默认拒绝：只认签得上的命令。 */
+const REQUIRE_SIG = (process.env.WATCH_AI_REQUIRE_SIG || "1") !== "0";
+
+const sha256Hex = (s) => createHash("sha256").update(s, "utf8").digest("hex");
+const hmacHex = (msg) => createHmac("sha256", KEY).update(msg, "utf8").digest("hex");
+
+/** 定长比较，避免因为提前 return 泄漏「前几位是否相同」。 */
+function sigEq(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || !a || !b) return false;
+  const ba = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
+function commandInput(id, cmd) {
+  return `v1\n${id}\n${cmd}`;
+}
+
+/** 生成一套上行签名头（每次请求都是新的 ts + nonce，故每条请求都重算）。 */
+function authHeaders(method, path, bodyText) {
+  const ts = String(Date.now());
+  const nonce = randomBytes(16).toString("hex");
+  const input = `v1\n${ts}\n${nonce}\n${method.toUpperCase()}\n${path}\n${sha256Hex(bodyText)}`;
+  const headers = {
+    "X-Agent-Sig": hmacHex(input),
+    "X-Agent-Ts": ts,
+    "X-Agent-Nonce": nonce,
+  };
+  if (AGENT_ID) headers["X-Agent-Id"] = AGENT_ID;
+  return headers;
+}
+
+/** 下行命令验签：签名对不上就绝不执行。 */
+function cmdTrusted(sig, id, cmd) {
+  if (!sig) {
+    log(`拒绝未签名命令 ${id}${REQUIRE_SIG ? "（已强制验签）" : ""}`);
+    return !REQUIRE_SIG;
+  }
+  const ok = sigEq(sig, hmacHex(commandInput(id, cmd)));
+  if (!ok) log(`拒绝签名不符的命令 ${id}`);
+  return ok;
 }
 
 function log(msg) {
@@ -239,10 +328,11 @@ function restartShell(reason) {
 // ------------------------------------------------------------------ 回传
 
 function postOut(payload) {
+  const body = JSON.stringify(payload);
   return fetch(`${WORKER}/shell/out`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Agent-Key": KEY },
-    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json", ...authHeaders("POST", "/shell/out", body) },
+    body,
   })
     .then((r) => {
       if (!r.ok) log(`回传被拒：HTTP ${r.status}`);
@@ -416,17 +506,33 @@ function sendCtrlC() {
 // ------------------------------------------------------------------ SSE 订阅
 
 function handleEvent(ev) {
-  if (ev?.t === "cmd") runCommand(ev.id, ev.cmd, ev.q === 1);
-  else if (ev?.t === "ctrlc") sendCtrlC();
+  if (ev?.t === "cmd") {
+    if (!cmdTrusted(ev.sig, ev.id, ev.cmd)) return;
+    runCommand(ev.id, ev.cmd, ev.q === 1);
+    return;
+  }
+  if (ev?.t === "ctrlc") {
+    // 控制帧同样要验签：不然谁都能反复打断你正在跑的构建
+    if (REQUIRE_SIG && !(ev.sig && sigEq(ev.sig, hmacHex(commandInput("__ctrlc__", ""))))) {
+      log("拒绝未签名/签名不符的 ctrlc");
+      return;
+    }
+    sendCtrlC();
+  }
 }
 
 async function subscribe(signal) {
   const res = await fetch(`${WORKER}/shell/stream`, {
-    headers: { "X-Agent-Key": KEY, Accept: "text/event-stream" },
+    headers: { Accept: "text/event-stream", ...authHeaders("GET", "/shell/stream", "") },
     signal,
   });
-  if (!res.ok) throw new Error(`SSE HTTP ${res.status}`);
-  log("SSE 已连接");
+  if (!res.ok) {
+    // 401 = 签名/密钥不对。这种情况重连再快也没用，日志里必须写清楚原因，
+    // 否则现场只会看到「一直连不上」而不知道怎么修。
+    const why = res.status === 401 ? "鉴权失败（密钥或签名不匹配，检查 AGENT_KEY）" : `HTTP ${res.status}`;
+    throw new Error(`SSE ${why}`);
+  }
+  log("SSE 已连接（HMAC 签名已启用）");
 
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -469,6 +575,7 @@ async function subscribe(signal) {
 // ------------------------------------------------------------------ main
 
 const KEY = resolveKey();
+const AGENT_ID = resolveAgentId();
 
 async function main() {
   if (!KEY) {
@@ -478,6 +585,16 @@ async function main() {
     );
     process.exit(1);
   }
+  if (KEY.length < 32) {
+    // 短密钥对 HMAC 来说等于没有：一秒几万次的离线爆破就能试出来
+    log(`密钥过短（${KEY.length} 字符）→ 拒绝启动。请用 ≥32 字符的随机串（openssl rand -hex 32）`);
+    process.exit(1);
+  }
+  if (!WORKER.startsWith("https://") && !WORKER_IS_LOCAL) {
+    log(`Worker 地址必须是 https：${WORKER}`);
+    process.exit(1);
+  }
+  log(`启动：worker=${WORKER} id=${AGENT_ID || "(未设置)"} 验签=${REQUIRE_SIG ? "强制" : "宽松"}`);
 
   mkdirSync(dirname(LOG_FILE), { recursive: true });
   startShell();
