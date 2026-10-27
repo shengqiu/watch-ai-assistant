@@ -288,6 +288,19 @@ function startShell() {
   safeWrite("stty -echo 2>/dev/null\n");
   safeWrite("export PS1=''; export PS2=''; export PROMPT_COMMAND=''; export TERM=dumb\n");
   safeWrite(`cd ${JSON.stringify(WORKDIR)} 2>/dev/null || cd ~\n`);
+  // Codespaces secret 并不是普通容器环境变量：它由 /etc/profile.d/codespaces.sh 在
+  // 「登录 shell 且 $SSH_CONNECTION 非空」时才导出。agent 由 post-start.sh 拉起时那边会
+  // 主动补一次；但被 supervisor 重启、或手动 setsid 拉起时，环境里就没有 GEMINI_API_KEY
+  // → /gemini 会误报「还没有 API key」（2026-10-27 实际踩到）。
+  // 这里在 bash 初始化时从 secret 源文件补一次：源头一致，且与启动方式解耦。
+  // 已存在的值不覆盖（post-start 注入的优先）；read 不到就静默跳过。
+  safeWrite(
+    'for __n in GEMINI_API_KEY WATCH_AI_AGENT_KEY; do ' +
+      '[ -n "$(printenv $__n 2>/dev/null)" ] && continue; ' +
+      '__e=$(sed -n "s/^$__n=//p" /workspaces/.codespaces/shared/.env-secrets 2>/dev/null | head -1); ' +
+      '[ -n "$__e" ] && export "$__n=$(printf %s "$__e" | base64 -d 2>/dev/null)"; ' +
+      'unset __e; done 2>/dev/null; unset __n\n',
+  );
 }
 
 /** 往 bash stdin 写一行，永远不抛（bash 死掉/管道断开都只是记日志）。 */
