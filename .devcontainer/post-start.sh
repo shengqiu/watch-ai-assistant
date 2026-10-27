@@ -57,11 +57,11 @@ load_secret GEMINI_API_KEY
 # 两者都没有就留空（Worker 侧只记录不强制，不会因此断连）。
 IDENTITY_FILE="$HOME/.config/watch-ai/agent-id"
 if [ -z "${WATCH_AI_AGENT_ID:-}" ]; then
-  id_val="${CODESPACE_NAME:-}"
-  if [ -z "$id_val" ]; then
-    id_val=$(sed -n 's/.*"environmentId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-      /workspaces/.codespaces/shared/devContainerTelemetry.json 2>/dev/null | head -1)
-  fi
+  # 顺序重要：environmentId 是稳定值，每条路径都能拿到；CODESPACE_NAME 只在
+  # 部分启动路径里存在。反过来取会导致「这次写 A、下次写 B」的身份抖动。
+  id_val=$(sed -n 's/.*"environmentId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    /workspaces/.codespaces/shared/devContainerTelemetry.json 2>/dev/null | head -1)
+  [ -n "$id_val" ] || id_val="${CODESPACE_NAME:-}"
   if [ -n "$id_val" ]; then
     mkdir -p "$(dirname "$IDENTITY_FILE")"
     printf '%s' "$id_val" >"$IDENTITY_FILE"
