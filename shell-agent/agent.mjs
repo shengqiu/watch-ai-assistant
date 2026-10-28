@@ -70,8 +70,13 @@ const PROGRESS_REPEAT_MS = Number(process.env.WATCH_AI_PROGRESS_REPEAT_MS || 300
 const FLUSH_MS = Number(process.env.WATCH_AI_FLUSH_MS || 1200);
 /** 多久没有任何输出就提示「仍在运行」（不杀进程，只告知）。Gemini 思考常超 20s，故放宽。 */
 const STALL_MS = Number(process.env.WATCH_AI_STALL_MS || 30000);
-/** 单条命令最多回传多少字符（超出丢弃；Worker 端还有一层掐头尾） */
-const MAX_CHARS = Number(process.env.WATCH_AI_MAX_CHARS || 60000);
+/**
+ * 单条命令最多回传多少字符（超出丢弃；Worker 端还有一层掐头尾）。
+ * v2026-10-28b 起默认不设实际限制（200 万字符 ≈ 2MB，单条命令根本到不了）：
+ * 用户要求「codebuddy 的 stdout 完整发给我」，旧默认 60000 会把长输出的
+ * 尾部整段丢掉。内存上不是问题：文本按行 push 进 buf，2MB 远低于 Node 默认堆。
+ */
+const MAX_CHARS = Number(process.env.WATCH_AI_MAX_CHARS || 2_000_000);
 /** 多久没收到 SSE 字节就当死连接重连（Worker 心跳 20s） */
 const SILENCE_MS = Number(process.env.WATCH_AI_SILENCE_MS || 60000);
 /**
