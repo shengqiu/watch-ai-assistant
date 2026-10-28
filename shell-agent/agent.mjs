@@ -26,6 +26,9 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+// proc.mjs 与本文件同目录：相对 import 由 Node 按文件位置解析，
+// 所以 supervise.sh 从任何 cwd 拉起 agent 都能找到它。
+import { probeTree, judgeIdle, stateLine, fmtDur, procAvailable } from "./proc.mjs";
 
 // ------------------------------------------------------------------ 配置
 
@@ -50,6 +53,18 @@ const WORKER = (() => {
 const WORKER_IS_LOCAL = WORKER.startsWith("http://");
 
 const WORKDIR = process.env.WATCH_AI_WORKDIR || "/workspaces/watch-ai-assistant";
+
+/**
+ * 进程探针（见 proc.mjs）：
+ * 以前判断「卡死」只看「有没有输出」，于是把「codebuddy 思考 5 分钟」也当成卡死
+ * 直接 SIGKILL 整个进程组 —— 长任务必死。现在先读 /proc 看证据再决定。
+ */
+const NEVER_MOVED_MS = Number(process.env.WATCH_AI_NEVER_MOVED_MS || 600_000);
+/** CPU 冻住多久判定真挂死（默认 15 分钟）。S 状态但 CPU 还在涨 = 活着，不算。 */
+const STUCK_MS = Number(process.env.WATCH_AI_STUCK_MS || 900_000);
+/** 无输出多久开始周期性播报进度（之后每 PROGRESS_MS 一次）。 */
+const PROGRESS_MS = Number(process.env.WATCH_AI_PROGRESS_MS || 120_000);
+const PROGRESS_REPEAT_MS = Number(process.env.WATCH_AI_PROGRESS_REPEAT_MS || 300_000);
 
 /** 增量输出静默多久就推一条消息（毫秒） */
 const FLUSH_MS = Number(process.env.WATCH_AI_FLUSH_MS || 1200);
@@ -224,6 +239,26 @@ let lastOutputAt = 0;
 let shellGen = 0;
 let wedgeTimer = null;
 
+// ------------------------------------------------------------ 进程探针状态
+/** 最近一次探针结果（5 秒一探，心跳直接复用，不必每次都读 /proc） */
+let lastProbe = null;
+/** 按 pid 记录「上次见到的 CPU 累计」，用来判断这条命令到底还在不在动 */
+let cpuSeen = new Map();
+/** 第一次探测只记基线，不算「动过」——否则 wrapper 的启动 CPU 会被当成进度 */
+let cpuPrimed = false;
+/** 这条命令的 CPU 有没有真的增长过 */
+let cpuGrew = false;
+/** CPU 最后一次增长的时刻（cpuFrozenMs = now - cpuMaxAt） */
+let cpuMaxAt = 0;
+
+function resetProcState(now = Date.now()) {
+  lastProbe = null;
+  cpuSeen = new Map();
+  cpuPrimed = false;
+  cpuGrew = false;
+  cpuMaxAt = now;
+}
+
 // ------------------------------------------------------------------ 持久 bash
 
 function hasBin(name) {
@@ -368,7 +403,14 @@ function postOut(payload) {
 
 /** 心跳：告诉 Worker「我活着，此刻在跑的是哪条命令」（Worker 侧的在线判定只看这个）。 */
 function postPing() {
-  const body = JSON.stringify({ epoch: EPOCH, gen: shellGen, running: running ? running.id : null });
+  // proc：在跑的那条命令此刻的进程状态（一行人话）。Worker 拿它回答
+  // 「到底是在等、被挂起了、还是已经死了」—— 这是 /cs 和进度播报的数据源。
+  const body = JSON.stringify({
+    epoch: EPOCH,
+    gen: shellGen,
+    running: running ? running.id : null,
+    proc: running && lastProbe?.tree ? stateLine(lastProbe.tree) : null,
+  });
   return fetch(`${WORKER}/shell/ping`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders("POST", "/shell/ping", body) },
@@ -403,7 +445,9 @@ function scheduleFlush() {
   stallTimer = setTimeout(() => {
     if (running && !running.stallNotified) {
       running.stallNotified = true;
-      buf.push("⏳ 命令仍在运行（20 秒无新输出）…\n");
+      // 带上进程状态：这样「在跑」不是一句空话——能看出是在等网络还是已经冻住
+      probeNow();
+      buf.push(`⏳ 命令仍在运行（${Math.round(STALL_MS / 1000)} 秒无新输出）…${procSuffix()}\n`);
       flushIncremental();
     }
   }, STALL_MS);
@@ -415,6 +459,7 @@ function finish(exit) {
   const r = running;
   running = null;
   lastOutputAt = 0;
+  resetProcState();
   if (!r) return;
   let text = buf.join("") + partial;
   buf = [];
@@ -426,6 +471,58 @@ function finish(exit) {
   log(`done: exit=${exit} cwd=${r.cwd || ""} chars=${r.sentChars}`);
 }
 
+/** 读一次进程树并缓存。root = 长驻 bash（或它的 pty wrapper）的 pid。 */
+function probeNow() {
+  if (!child?.pid) {
+    lastProbe = null;
+    return null;
+  }
+  const tree = probeTree(child.pid);
+  lastProbe = tree ? { at: Date.now(), tree } : null;
+  return tree;
+}
+
+/** 进程状态一行（给「仍在运行」提示和心跳共用）。读不到就返回空串。 */
+function procSuffix() {
+  const t = lastProbe?.tree;
+  return t ? ` · ${stateLine(t)}` : "";
+}
+
+/**
+ * 更新 CPU 轨迹。
+ *
+ * 逐 pid 比较而不是比较整棵树的 CPU 之和：子进程会退出（它的 CPU 从总和里消失），
+ * 新进程会加入（总和跳变），只看总和会误判成「冻住」或「一直在动」。
+ */
+function trackCpu(tree, now) {
+  if (!tree) return;
+  if (!cpuPrimed) {
+    // 首次探测：只记基线。否则 wrapper/bash 的启动 CPU 会被当成这条命令的进度，
+    // 「从没动过」这个判据就永远不成立 —— 那正是 2026-10-27 事故的形态。
+    cpuPrimed = true;
+    cpuSeen = new Map(tree.all.map((p) => [p.pid, p.cpuMs]));
+    cpuMaxAt = now;
+    cpuGrew = false;
+    return;
+  }
+  let moved = false;
+  const next = new Map();
+  for (const p of tree.all) {
+    const prev = cpuSeen.get(p.pid);
+    if (prev === undefined) {
+      if (p.cpuMs > 0) moved = true; // 新进程且已经烧过 CPU
+    } else if (p.cpuMs > prev + 20) {
+      moved = true; // 20ms 容差：时钟节拍是 10ms，抖动不算动
+    }
+    next.set(p.pid, Math.max(prev ?? 0, p.cpuMs));
+  }
+  cpuSeen = next;
+  if (moved) {
+    cpuGrew = true;
+    cpuMaxAt = now;
+  }
+}
+
 /**
  * 判定卡死后的强制回收：
  *   ① 立刻给 Worker 回一条 done(exit=124)，把队列放出来（这是用户能继续用的关键，
@@ -433,10 +530,10 @@ function finish(exit) {
  *   ② 把已经收到的输出一起捎上，别让用户白等；
  *   ③ 换一个干净的 bash。
  */
-function reclaimWedge(reason, limitMs) {
+function reclaimWedge(note, idle) {
   const r = running;
   if (!r) return;
-  log(`看门狗：${reason} → 判定卡死，回收命令 ${r.id}`);
+  log(`看门狗：${note} → 回收命令 ${r.id}（已 ${Math.round(idle / 1000)}s 无输出）`);
   running = null;
   lastOutputAt = 0;
   clearTimers();
@@ -446,31 +543,109 @@ function reclaimWedge(reason, limitMs) {
   partial = "";
   if (text) text += "\n\n";
   text +=
-    `⚠️ ${Math.round((limitMs ?? WEDGE_MS) / 1000)} 秒没有任何输出，判定通道卡死。\n` +
+    `⚠️ ${note}（${fmtDur(idle)}无输出）。\n` +
     `已强制中断这条命令并重启 bash —— 之前 cd / export 的 shell 状态没了，重发一次即可。`;
   void postOut({ id: r.id, text, done: true, exit: 124, cwd: null });
   restartShell("命令卡死");
 }
 
 /**
- * 卡死看门狗：每 5 秒查一次「有命令在跑、但长时间零字节输出」。
- * 注意它只兜「进程活着但没反应」——bash 直接退出由 exit 回调管，两条路互不干扰。
+ * 「命令其实已经跑完了，只是收尾标记没回来」。
+ * 这种情况 bash 是健康的，所以只收尾、不重启 —— 重启会把 shell 状态白白丢掉。
+ */
+function finishGone(note, idle) {
+  const r = running;
+  if (!r) return;
+  log(`看门狗：${note} → 收尾命令 ${r.id}（已 ${Math.round(idle / 1000)}s 无输出）`);
+  running = null;
+  lastOutputAt = 0;
+  clearTimers();
+
+  let text = (buf.join("") + partial).replace(/\n+$/, "");
+  buf = [];
+  partial = "";
+  if (text) text += "\n\n";
+  text += `ℹ️ ${note}（${fmtDur(idle)}无输出），已按结束处理。`;
+  void postOut({ id: r.id, text, done: true, exit: null, cwd: null });
+}
+
+/** 只报一次的异常（被挂起 / 卡 IO）—— 不自动杀，交给人决定。 */
+function noteOnce(r, note) {
+  if (r.noted === note) return;
+  r.noted = note;
+  buf.push(`⚠️ ${note} —— 不会自动中断，/ctrlc 可以打断。\n`);
+  flushIncremental();
+}
+
+/** 长任务周期性播报：告诉用户「还在跑、进程是什么状态」，而不是让他干等。 */
+function maybeReportProgress(r, idle, now) {
+  if (idle < PROGRESS_MS) return;
+  if (r.progressAt && now - r.progressAt < PROGRESS_REPEAT_MS) return;
+  r.progressAt = now;
+  buf.push(`⏳ 仍在运行（${fmtDur(idle)}无新输出）${procSuffix()}\n`);
+  flushIncremental();
+}
+
+/**
+ * 看门狗：每 5 秒看一次「有命令在跑但长时间零字节输出」该怎么处理。
  *
- * 两个阈值，因为「一直没动静」和「吐了几句就没动静」的可信度不一样：
- *   · 下发后**从未**输出过 → WEDGE_MS（默认 4 分钟）就回收。真实事故就是这种：
- *     整整 12 分钟零字节，bash 活着但没有任何反应。
- *   · 已经输出过再静默 → 放宽到 2 倍。这类可能是正常的长尾（装包最后在校验、
- *     模型想完才吐答案），杀错了代价大（shell 状态全丢），宁可多等。
+ * 这一版的关键变化：**不再只看「有没有输出」**。codebuddy / gemini 接了大活时
+ * 连续几分钟不吐字节是常态，旧逻辑（4 分钟零输出 = 卡死）会把它们直接 SIGKILL，
+ * 整个进程组一起没 —— 正在写的文件可能只写一半。现在先看进程证据再决定：
+ *
+ *   gone         命令的进程全没了（bash 还好好的）→ 其实跑完了，只收尾不重启
+ *   zombie       进程已是僵尸                    → 回收
+ *   never-moved  一次 CPU 都没动过且静默 10 分钟  → 回收（2026-10-27 事故形态）
+ *   cpu-frozen   动过但 CPU 冻住 15 分钟          → 回收
+ *   suspended    SIGSTOP / 被调试器停住           → 只报，不杀
+ *   io           卡在不可中断 IO                  → 只报，不杀
+ *   waiting      其余                            → 继续等，周期性播报进度
+ *
+ * 读不到 /proc（非 Linux）时退回旧的纯时间判据，绝不把「读不到」当成「卡死」。
  */
 function startWedgeWatchdog() {
   if (wedgeTimer) clearInterval(wedgeTimer);
   wedgeTimer = setInterval(() => {
+    const now = Date.now();
+    const tree = probeNow();
     if (!running || !lastOutputAt) return;
     const r = running;
-    const limit = r.everOutput ? WEDGE_MS * 2 : WEDGE_MS;
-    const idle = Date.now() - lastOutputAt;
-    if (idle < limit) return;
-    reclaimWedge(`命令 ${r.id} 已 ${Math.round(idle / 1000)}s 无任何输出（阈值 ${Math.round(limit / 1000)}s）`, limit);
+    const idle = now - lastOutputAt;
+    trackCpu(tree, now);
+
+    if (!tree) {
+      if (!procAvailable()) {
+        // 非 Linux：没有进程证据，退回纯时间兜底（旧行为）
+        const limit = r.everOutput ? WEDGE_MS * 2 : WEDGE_MS;
+        if (idle >= limit) reclaimWedge(`${Math.round(limit / 1000)} 秒没有任何输出，判定卡死`, idle);
+      }
+      // 有 /proc 但探不到树 = bash 没了 → exit 回调会处理，这里不动
+      return;
+    }
+
+    const j = judgeIdle({
+      tree,
+      idleMs: idle,
+      cpuGrew,
+      cpuFrozenMs: now - cpuMaxAt,
+      wedgeMs: NEVER_MOVED_MS,
+      stuckMs: STUCK_MS,
+      goneIdleMs: 15_000,
+    });
+
+    if (j.kill) {
+      reclaimWedge(j.note, idle);
+      return;
+    }
+    if (j.verdict === "gone") {
+      finishGone(j.note, idle);
+      return;
+    }
+    if (j.verdict === "suspended" || j.verdict === "io") {
+      noteOnce(r, j.note);
+      return;
+    }
+    maybeReportProgress(r, idle, now);
   }, 5000);
 }
 
@@ -527,10 +702,21 @@ function runCommand(id, cmd, quiet = false) {
   }
   // 签收：让 Worker 知道这条命令**真的到了**（不是写进了一条死连接）。
   void postOut({ id, ack: true });
-  running = { id, cmd, cwd: null, sentChars: 0, truncated: false, stallNotified: false, everOutput: false };
+  running = {
+    id,
+    cmd,
+    cwd: null,
+    sentChars: 0,
+    truncated: false,
+    stallNotified: false,
+    everOutput: false,
+    progressAt: 0,
+    noted: null,
+  };
   buf = [];
   partial = "";
   lastOutputAt = Date.now(); // 看门狗从下发这一刻开始计时
+  resetProcState(lastOutputAt); // CPU 轨迹从这一刻起算，别把上一条的当成进度
   // quiet：命令原文含密钥（如 /gemini key），只记长度不记内容
   log(quiet ? `exec: [hidden ${cmd.length} chars]` : `exec: ${cmd.replace(/\n/g, " ; ")}`);
 
