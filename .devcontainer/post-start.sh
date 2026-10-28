@@ -95,6 +95,9 @@ extra_listen=$(ss -ltn 2>/dev/null | awk '$4 ~ /^0\.0\.0\.0:/ || $4 ~ /^\[::\]:/
 [ -n "${extra_listen:-}" ] && log "⚠️ 检测到额外入站监听（确认是否必要，且必须是 private）：$extra_listen"
 
 # ------------------------------------------------------- 2) 幂等：确认活着的真是 agent
+# supervisor 也算「活着」：它才是常驻的那个，agent 是它的子进程。
+# 只认 agent.mjs 的话，pidfile 里存 supervisor 的 pid 就永远判「残留」，
+# 每次开机都白跑一遍拉起流程（2026-10-28 之前的日志里全是这行）。
 agent_alive() {
   local p="${1:-}" args
   [ -n "$p" ] || return 1
@@ -102,6 +105,7 @@ agent_alive() {
   args=$(ps -p "$p" -o args= 2>/dev/null) || return 1
   case "$args" in
     *shell-agent/agent.mjs*) return 0 ;;
+    *shell-agent/supervise.sh*) return 0 ;;
     *) return 1 ;;   # PID 被复用：pidfile 是上个容器的残留
   esac
 }
@@ -126,5 +130,17 @@ if [ -z "${WATCH_AI_AGENT_KEY:-}" ] && [ ! -f "$HOME/.config/watch-ai/agent-key"
 fi
 
 setsid nohup bash shell-agent/supervise.sh >>"$LOG_DIR/supervise.log" 2>&1 < /dev/null &
-echo $! >"$PIDFILE"
-log "已拉起 supervisor pid=$!"
+
+# pidfile 由 supervise.sh 自己写（它才拿得到真实 pid；`$!` 记的是 setsid 那层壳，
+# 一旦 setsid 需要 fork 就完全对不上）。这里不写 pidfile，只做「起没起来」的确认：
+# 原先拉起后没有任何校验，脚本 0.2 秒就结束了，agent 万一没起来（node 不在 PATH、
+# 密钥没注入、flock 没抢到），日志里只留一行「已拉起」，事后完全查不出原因。
+for _ in $(seq 1 20); do
+  pgrep -f "shell-agen[t]/agent.mjs" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+if pgrep -f "shell-agen[t]/agent.mjs" >/dev/null 2>&1; then
+  log "agent 已上线（supervisor pid=$(cat "$PIDFILE" 2>/dev/null)，agent pid=$(pgrep -f "shell-agen[t]/agent.mjs" | head -1)）"
+else
+  log "⚠️ supervisor 拉起来了，但 10 秒内没看到 agent 进程：去 agent.log / supervise.log 看原因（常见：node 不在 PATH、密钥没注入）"
+fi
