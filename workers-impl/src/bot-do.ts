@@ -49,7 +49,10 @@ import { isVerified, isAnswerMatch, nextExpiry, CHALLENGE_TEXT, type VerifyState
 // v16：移除 QQ 通道——删除 src/qq/、docs/HOSTING.md（早期选址文档）与 diagram.html
 //     （早期架构图），env/config/路由/测试同步清理；仅保留 Telegram 单通道。
 //     消息流水线、LLM 路由、状态存储逻辑不变。
-const BUILD = "telegram-20261026-v19";
+// v20（2026-11-02）：验证闸默认关闭（用户要求关掉「爸爸」验证）。
+//   - 新增 verifyGateOff：verify_off:<chatId> 未设置/true → 闸关（不验证）；false → 闸开。
+//   - 验证块整体受该闸控制；/verify on|off 可按 chat 重新开关。
+const BUILD = "telegram-20261102-v20";
 
 const SYSTEM_PROMPT = `你是一位资深软件工程师，通过用户的智能手表语音接收编程需求。
 输出要求：
@@ -138,15 +141,15 @@ export class AssistantDO extends DurableObject<Env> {
     if (await this.seenMsg(key)) return;
     await this.markSeen(key);
 
-    // 2) 白名单（未配置 = 放开，仅建议开发期）。匹配 chat_id 或 user_id 任一即可。
-    //    拒绝时回报 chat_id，方便管理员把自己加白（只回一次/分钟，避免被刷屏）。
+    // 2) 白名单（未配置 = 放开，仅建议开发期）。**只认 user_id（from.id）**，不认 chat_id。
+    //    拒绝时回报 user_id，方便管理员把该号加白（只回一次/分钟，避免被刷屏）。
     const allowed = (this.env.ALLOWED_USERS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    if (allowed.length > 0 && !allowed.includes(m.chatId) && !allowed.includes(m.userId)) {
-      console.log(`[tg] 非白名单 chat=${m.chatId}，拒绝`);
+    if (allowed.length > 0 && !allowed.includes(m.userId)) {
+      console.log(`[tg] 非白名单 user=${m.userId}（chat=${m.chatId}），拒绝`);
       if (await this.allowRate(m.chatId)) {
         await this.reply(
           m.chatId,
-          `未授权用户。你的 chat_id 是 ${m.chatId}，请联系管理员加入白名单。`,
+          `未授权用户。你的 user_id 是 ${m.userId}，请联系管理员加入白名单。`,
         );
       }
       return;
@@ -177,30 +180,44 @@ export class AssistantDO extends DurableObject<Env> {
     }
     console.log(`[tg] 消息 chat=${m.chatId} source=${source} text=${text.slice(0, 80)}`);
 
-    // 5.5) 身份验证（30 分钟滑动会话）：
-    //   - 未验证：一切问题/指令都不转发 LLM，只回验证问题；
-    //     若这条消息本身就是正确答案（「爸爸」）→ 通过并延续 30 分钟。
-    //   - 已验证：任何交互把会话滑动延续 30 分钟。
-    //   - 设备限制由「白名单账号」达成（Telegram 不提供设备信息）。
-    const now = Date.now();
-    const verifyAnswer = this.env.VERIFY_ANSWER;
-    const sessionMs = this.verifySessionMs();
-    const state = await this.getVerify(m.chatId);
-    if (!isVerified(state, now)) {
-      if (verifyAnswer && isAnswerMatch(text, verifyAnswer)) {
-        await this.setVerify(m.chatId, nextExpiry(now, sessionMs));
-        await this.reply(m.chatId, "验证通过 ✓（半小时内互动免验证）");
-        return;
-      }
-      await this.setVerify(m.chatId, 0); // 保持未验证
+    // 5.5) 验证闸开关（默认关闭，2026-11-02 用户要求关掉「爸爸」验证）
+    //   /verify off（默认）：永不要求验证，消息直达助手；
+    //   /verify on：重新开启——未验证时须回答验证词才会放行（仅限本 chat）。
+    if (/^\/verify\s+(on|off)\s*$/i.test(text.trim())) {
+      const enable = /^on\b/i.test(text.trim());
+      await this.setVerifyGate(m.chatId, !enable);
       await this.reply(
         m.chatId,
-        verifyAnswer ? CHALLENGE_TEXT : `${CHALLENGE_TEXT}\n（管理员未配置验证答案，服务锁定中）`,
+        enable
+          ? "✅ 验证已开启：本 chat 下次未验证时会要求回答验证词才会放行。"
+          : "🔓 验证已关闭：不再要求验证，消息直达助手。",
       );
       return;
     }
-    // 已验证 → 滑动延续
-    await this.setVerify(m.chatId, nextExpiry(now, sessionMs));
+
+    // 5.5) 身份验证（30 分钟滑动会话）—— 受验证闸控制，闸默认关闭
+    const verifyOff = await this.verifyGateOff(m.chatId);
+    if (!verifyOff) {
+      const now = Date.now();
+      const verifyAnswer = this.env.VERIFY_ANSWER;
+      const sessionMs = this.verifySessionMs();
+      const state = await this.getVerify(m.chatId);
+      if (!isVerified(state, now)) {
+        if (verifyAnswer && isAnswerMatch(text, verifyAnswer)) {
+          await this.setVerify(m.chatId, nextExpiry(now, sessionMs));
+          await this.reply(m.chatId, "验证通过 ✓（半小时内互动免验证）");
+          return;
+        }
+        await this.setVerify(m.chatId, 0); // 保持未验证
+        await this.reply(
+          m.chatId,
+          verifyAnswer ? CHALLENGE_TEXT : `${CHALLENGE_TEXT}\n（管理员未配置验证答案，服务锁定中）`,
+        );
+        return;
+      }
+      // 已验证 → 滑动延续
+      await this.setVerify(m.chatId, nextExpiry(now, sessionMs));
+    }
 
     // 6.5) 诊断命令：回显最后一轮模型回复的原文格式，定位「高亮不生效」问题。
     // 用可见标记替换围栏/缩进，纯文本发送（不走 mdToV2，避免二次转换干扰判断）。
@@ -419,6 +436,21 @@ export class AssistantDO extends DurableObject<Env> {
   }
 
   // ---------------------------------------------------------------- 验证会话存储
+
+  // ---------------------------------------------------------------- 验证闸（默认关闭）
+
+  /** 验证闸默认关闭（2026-11-02 用户要求关掉「爸爸」验证）。
+   *  store verify_off:<chatId>：
+   *    - 未设置 / true  → 闸关（不验证，消息直达助手）
+   *    - false          → 闸开（未验证时须回答验证词才会放行）
+   */
+  private async verifyGateOff(chatId: string): Promise<boolean> {
+    return (await this.ctx.storage.get<boolean>(`verify_off:${chatId}`)) !== false;
+  }
+
+  private async setVerifyGate(chatId: string, off: boolean): Promise<void> {
+    await this.ctx.storage.put(`verify_off:${chatId}`, off);
+  }
 
   private async getVerify(chatId: string): Promise<VerifyState | undefined> {
     const key = `verify:${chatId}`;

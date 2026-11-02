@@ -74,7 +74,7 @@ curl https://watch-ai-qqbot.<你的子域>.workers.dev/setup
 
 ```bash
 curl https://watch-ai-qqbot.<你的子域>.workers.dev/healthz
-# → {"ok":true,"build":"telegram-20261025-v16","channel":"telegram"}
+# → {"ok":true,"build":"telegram-20261026-v19","channel":"telegram"}
 ```
 
 看实时日志：`npx wrangler tail`。
