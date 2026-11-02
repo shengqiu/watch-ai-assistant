@@ -21,6 +21,7 @@ import { parseIntent, effortFor, type Intent } from "./router/intent";
 import { chatChain, loadProviders, type ChatResult } from "./router/providers";
 import { chunkText, transcribeBytes } from "./asr";
 import { isVerified, isAnswerMatch, nextExpiry, CHALLENGE_TEXT, type VerifyState } from "./verify";
+import { isGeminiQuotaError } from "./quota";
 
 // 构建标记：每次改动后递增，方便确认线上跑的是不是最新包（curl /healthz 看 build 字段）。
 // v2：Gemini 思考档位控制（reasoning_effort）+ 模型级降级 fallback + 分层超时。
@@ -52,7 +53,15 @@ import { isVerified, isAnswerMatch, nextExpiry, CHALLENGE_TEXT, type VerifyState
 // v20（2026-11-02）：验证闸默认关闭（用户要求关掉「爸爸」验证）。
 //   - 新增 verifyGateOff：verify_off:<chatId> 未设置/true → 闸关（不验证）；false → 闸开。
 //   - 验证块整体受该闸控制；/verify on|off 可按 chat 重新开关。
-const BUILD = "telegram-20261102-v20";
+// v21（2026-11-02）：Gemini 免费额度闸门（用户要求：额度耗尽时通知并暂停提问，恢复后放行）。
+//   - 主厂商 Gemini 免费层 429/配额耗尽 → 通知一次 + 暂停本 chat 提问（gem_blocked:<chatId>）。
+//   - DO alarm 每 5 分钟主动探测；被拦消息每 3 分钟节流探测兜底；恢复后通知放行。
+const BUILD = "telegram-20261102-v21";
+
+/** Gemini 免费额度恢复探测：DO alarm 主动探测间隔 */
+const GEM_PROBE_INTERVAL_MS = 5 * 60_000;
+/** 被拦时每条消息触发探测的节流（避免刷屏式探测） */
+const GEM_PROBE_THROTTLE_MS = 3 * 60_000;
 
 const SYSTEM_PROMPT = `你是一位资深软件工程师，通过用户的智能手表语音接收编程需求。
 输出要求：
@@ -228,6 +237,20 @@ export class AssistantDO extends DurableObject<Env> {
       return;
     }
 
+    // 5.7) Gemini 免费额度闸门（v21）：额度耗尽时暂停本 chat 提问，恢复后主动通知。
+    //   被拦时每次消息都先试着探测恢复（节流）；若已恢复则放行本条消息继续正常处理。
+    if (await this.geminiBlockedAt(m.chatId)) {
+      if (await this.maybeProbeGemini(m.chatId)) {
+        // 探测已恢复并通知过 → 放行本条
+      } else {
+        await this.reply(
+          m.chatId,
+          "🚫 Gemini 免费额度仍耗尽——我暂不转发你的问题，恢复后第一时间通知你。",
+        );
+        return;
+      }
+    }
+
     // 6) 意图解析 + 会话历史 + LLM 路由
     const intent = parseIntent(text);
     const history = await this.getHistory(m.chatId);
@@ -239,6 +262,16 @@ export class AssistantDO extends DurableObject<Env> {
       via = `${result.provider}/${result.model} ${result.latencyMs}ms`;
     } catch (e) {
       console.error("[agent]", e);
+      // Gemini 免费额度耗尽 → 通知一次 + 暂停本 chat 提问，直至主动探测恢复
+      const intended = intent.chain[0] ?? this.defaultProvider(intent);
+      if (isGeminiQuotaError(e, intended)) {
+        await this.setGeminiBlocked(m.chatId);
+        await this.reply(
+          m.chatId,
+          "🚫 Gemini 免费额度耗尽（免费层已达上限）。我暂停接收你的问题，恢复后第一时间通知你。",
+        );
+        return;
+      }
       answer = `所有模型都调用失败了：${e instanceof Error ? e.message.slice(0, 150) : String(e).slice(0, 150)}`;
     }
 
@@ -335,6 +368,7 @@ export class AssistantDO extends DurableObject<Env> {
     const report = [
       `诊断报告 build=${BUILD}`,
       `通道: tg=${this.tg ? "on" : "off"}`,
+      `Gemini 免费额度闸门: ${(await this.geminiBlockedAt(chatId)) ? "被拦（暂停提问）" : "正常"}`,
       `最近输入: ${(lastUser?.content ?? "无").slice(0, 80)}`,
       `模型回复含围栏: ${/```/.test(raw) ? "是" : "否"}`,
       `模型回复含缩进行: ${/^( {4}|\t)/m.test(raw) ? "是" : "否"}`,
@@ -450,6 +484,113 @@ export class AssistantDO extends DurableObject<Env> {
 
   private async setVerifyGate(chatId: string, off: boolean): Promise<void> {
     await this.ctx.storage.put(`verify_off:${chatId}`, off);
+  }
+
+  // ---------------------------------------------------------------- Gemini 免费额度闸门（v21）
+
+  private async geminiBlockedAt(chatId: string): Promise<boolean> {
+    return (await this.ctx.storage.get<boolean>(`gem_blocked:${chatId}`)) === true;
+  }
+
+  private async setGeminiBlocked(chatId: string): Promise<void> {
+    await this.ctx.storage.put(`gem_blocked:${chatId}`, true);
+    await this.addBlockedChat(chatId);
+    await this.scheduleGeminiProbe();
+  }
+
+  private async clearGeminiBlocked(chatId: string): Promise<void> {
+    await this.ctx.storage.delete(`gem_blocked:${chatId}`);
+    await this.removeBlockedChat(chatId);
+  }
+
+  /** 当前被拦的 chat 列表（用于 alarm 批量探测） */
+  private async blockedChats(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>("gem_blocked_chats")) ?? [];
+  }
+  private async addBlockedChat(chatId: string): Promise<void> {
+    const a = await this.blockedChats();
+    if (!a.includes(chatId)) a.push(chatId);
+    await this.ctx.storage.put("gem_blocked_chats", a);
+  }
+  private async removeBlockedChat(chatId: string): Promise<void> {
+    const a = (await this.blockedChats()).filter((c) => c !== chatId);
+    await this.ctx.storage.put("gem_blocked_chats", a);
+  }
+
+  private async scheduleGeminiProbe(): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(Date.now() + GEM_PROBE_INTERVAL_MS);
+    } catch {
+      /* DO 未提供 alarm 时静默降级（被拦消息的节流探测仍能兜底） */
+    }
+  }
+
+  /** 对 Gemini 免费层发一次极轻量探测，返回是否可用（恢复）。 */
+  private async probeGemini(): Promise<boolean> {
+    try {
+      const providers = loadProviders(this.env);
+      const cfg = providers["gemini"];
+      if (!cfg) return false;
+      const model = cfg.fast_model || cfg.default_model;
+      const resp = await fetch(`${cfg.base_url.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${cfg.api_key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: "reply ok only" },
+            { role: "user", content: "hi" },
+          ],
+          max_tokens: 8,
+          temperature: 0,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!resp.ok) return false;
+      const data = (await resp.json()) as { choices?: { message?: { content?: string } }[] };
+      return Boolean(data.choices?.[0]?.message?.content);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 被拦消息的节流探测（兜底，防 alarm 不触发导致永久封死）。
+   * 返回 true 表示本次探测发现已恢复（并已通知、已解封）。
+   */
+  private async maybeProbeGemini(chatId: string): Promise<boolean> {
+    const last = (await this.ctx.storage.get<number>(`gem_probe:${chatId}`)) ?? 0;
+    if (Date.now() - last < GEM_PROBE_THROTTLE_MS) return false;
+    await this.ctx.storage.put(`gem_probe:${chatId}`, Date.now());
+    const ok = await this.probeGemini();
+    if (ok) {
+      await this.clearGeminiBlocked(chatId);
+      await this.reply(chatId, "✅ Gemini 免费额度已恢复，继续帮你～");
+      return true;
+    }
+    return false;
+  }
+
+  /** DO alarm：主动探测所有被拦 chat，恢复则解封并通知。 */
+  async alarm(): Promise<void> {
+    const chats = await this.blockedChats();
+    if (chats.length === 0) return;
+    const still: string[] = [];
+    for (const chatId of chats) {
+      if (!(await this.geminiBlockedAt(chatId))) continue; // 已被别的路径解封
+      const ok = await this.probeGemini();
+      if (ok) {
+        await this.clearGeminiBlocked(chatId);
+        await this.reply(chatId, "✅ Gemini 免费额度已恢复，继续帮你～");
+      } else {
+        still.push(chatId);
+      }
+    }
+    await this.ctx.storage.put("gem_blocked_chats", still);
+    if (still.length > 0) await this.scheduleGeminiProbe();
   }
 
   private async getVerify(chatId: string): Promise<VerifyState | undefined> {

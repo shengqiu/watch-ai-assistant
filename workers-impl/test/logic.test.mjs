@@ -156,6 +156,28 @@ check("无 message 返回 null", extractIncoming({ update_id: 102 }), null);
 // ---- 身份验证会话（verify.ts）----
 import { isVerified, isAnswerMatch, normalizeAnswer, nextExpiry, CHALLENGE_TEXT } from "../src/verify.js";
 
+// ---- Gemini 免费额度识别（quota.ts，v21）----
+import { isGeminiQuotaError, parseChainError, hasQuotaHint } from "../src/quota.js";
+
+const GEM_429 = "所有厂商均失败 -> gemini: [gemini/gemini-3.8-flash] HTTP 429: {\"error\":{\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"quota\"}}";
+const GEM_TIMEOUT = "所有厂商均失败 -> gemini: [gemini/gemini-3.8-flash] The operation was timed out";
+const DEEPSEEK_429 = "所有厂商均失败 -> deepseek: [deepseek/deepseek-chat] HTTP 429: rate limit";
+const BOTH_429 = "所有厂商均失败 -> deepseek: [deepseek/deepseek-chat] HTTP 429: rate limit | gemini: [gemini/gemini-3.5-flash-lite] HTTP 429: RESOURCE_EXHAUSTED";
+
+check("解析单段厂商错误", parseChainError(GEM_429).length, 1);
+check("解析段 provider", parseChainError(GEM_429)[0]?.provider, "gemini");
+check("解析段 status", parseChainError(GEM_429)[0]?.status, 429);
+check("解析两段厂商错误", parseChainError(BOTH_429).length, 2);
+
+check("gemini 429 → 是 Gemini 额度耗尽", isGeminiQuotaError(GEM_429, "gemini"), true);
+check("gemini 超时 → 非额度耗尽", isGeminiQuotaError(GEM_TIMEOUT, "gemini"), false);
+check("deepseek 429 但意图 gemini → 链中有 gemini 段也算", isGeminiQuotaError(BOTH_429, "deepseek"), true);
+check("deepseek 429 意图 deepseek → 非 Gemini 额度", isGeminiQuotaError(DEEPSEEK_429, "deepseek"), false);
+check("意图 gemini 但无配额特征 → 非额度", isGeminiQuotaError("所有厂商均失败 -> gemini: [gemini/x] HTTP 500: internal", "gemini"), false);
+check("hasQuotaHint 429", hasQuotaHint("HTTP 429"), true);
+check("hasQuotaHint RESOURCE_EXHAUSTED", hasQuotaHint("RESOURCE_EXHAUSTED"), true);
+check("hasQuotaHint 普通错误为否", hasQuotaHint("HTTP 500 internal"), false);
+
 const T0 = 1_000_000;
 const HALF_H = 30 * 60_000;
 
